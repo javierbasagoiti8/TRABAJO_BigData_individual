@@ -1,0 +1,460 @@
+---
+title: "La brecha educativa en Colombia"
+description: |
+  
+author:
+  - name: Javier Basagoiti
+    affiliation: Universitat de València
+    affiliation-url: https://www.uv.es
+date: 2025-12-24                           #--
+categories: [trabajo BigData, Brecha Educativa]   #--
+image: "./imagenes/Banner_brecha.jpg"
+title-block-banner: "./imagenes/Banner_brecha.jpg" #- {true, false, "green","#AA0000"}
+#title-block-banner-color: "skyblue3"    #-"#FFFFFF" 
+toc-depth: 3
+smooth-scroll: true
+self-contained: true
+format: 
+  html:
+    
+    link-external-newwindow: true
+
+code-tools: true
+code-link: true
+---
+
+# 1. Introducción
+
+Todos sabemos que la educación es el motor para que un país avance. Por eso, utilizando los datos de Colombia de 2021, vamos a averiguar como de preparados están los alumnos de bachiller. En este trabajo, analizo no solo los resultados, sino también qué factores son los que realmente mueven la aguja en el puntaje de los estudiantes.
+
+Para entenderlo mejor, vamos a ir paso a paso. Primero, echaremos un vistazo al mapa para ver qué departamentos lideran el ranking y cómo se distribuye la calidad académica en el país. Después, iremos al tema clave: la famosa brecha entre los colegios públicos (oficiales) y privados (no oficiales), para ver si las diferencias son tan grandes como se dice. Por último, veremos cómo han cambiado los promedios en los tiempos y qué impacto tuvieron eventos como la pandemia en nuestro sistema educativo.
+
+# 2. Datos
+
+Para realizar el trabajo he utilizado los siguientes datos:
+
+::: panel-tabset
+## Fuente de los datos
+
+Los datos utilizados provienen de distintas fuentes, entre ellas la base pública “\[Datos Abiertos\](https://www.datos.gov.co/Educaci-n/Resultados-nicos-Saber-11/kgxf-xxbe/about_data"}” de Colombia y las estadísticas del Ministerio de Educación Nacional ([MinEducación](https://www.mineducacion.gov.co/portal/){target="_blank"}).
+
+## Datos usados
+
+df_Master_Saber11 --\> Base maestra con la información detallada de todos los estudiantes del periodo 2021-1.
+
+df_Saber_Depto --\> Resultados promedio por departamento, base para el análisis geográfico y ranking regional.
+
+df_Brecha_Naturaleza --\> Comparativa clave de desempeño entre colegios públicos (Oficial) y privados (No Oficial).
+
+df_heatmap --\> Estructura de datos transformada para visualizar el rendimiento específico por materias en el mapa de calor.
+
+df_Zona_Ubicacion --\> Diferencias de rendimiento académico entre instituciones de zona Urbana y Rural.
+
+# Paquetes utilizados
+
+```{r}
+#| results: hide 
+#| warning: false 
+#| message: false
+
+library(tidyverse)
+library(ggplot2)
+library(rio) 
+library(janitor)
+library(ggthemes)
+library(scales)
+library(patchwork)
+library(plotly)
+library(sf)
+library(ggrepel)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(gganimate)
+library(dplyr)
+library(gifski)
+library(DT)
+```
+
+---
+## Codigo de los datos
+---
+
+```{r}
+#| results: hide 
+#| warning: false 
+#| message: false
+
+# 1. CARGA DE DATOS
+# --------------------------------------------------------------------------
+
+df_Master_Saber11 <- import("./my_Trabajo_BigData._files/Saber11_2021.csv") %>% 
+  janitor::clean_names()
+
+# --------------------------------------------------------------------------
+# 2. SELECCIÓN DE COLUMNAS
+# --------------------------------------------------------------------------
+
+df_Master_Saber11 <- df_Master_Saber11 %>%
+  select(
+    Puntaje_Final_Raw = matches("global|puntaje")[1], 
+    
+    # Busco la columna de departamento
+    Departamento_Raw = matches("cole_depto_ubicacion")[1], 
+    
+    Tipo = matches("naturaleza")[1],
+    Zona = matches("area_ubicacion|zona")[1],
+    starts_with("punt_")
+  )
+
+# --------------------------------------------------------------------------
+# 3. LIMPIEZA
+# --------------------------------------------------------------------------
+
+df_Master_Saber11 <- df_Master_Saber11 %>% 
+  mutate(
+    # 1. Arreglo el Puntaje
+    Puntaje_Final = parse_number(as.character(Puntaje_Final_Raw), locale = locale(decimal_mark = ",")),
+    Puntaje_Final = ifelse(is.na(Puntaje_Final), 
+                           parse_number(as.character(Puntaje_Final_Raw), locale = locale(decimal_mark = ".")), 
+                           Puntaje_Final),
+
+    # 2. LIMPIEZA  NOMBRES
+    Departamento = str_to_upper(iconv(Departamento_Raw, from = "UTF-8", to = "ASCII//TRANSLIT")),
+    Departamento = str_remove_all(Departamento, "[^A-Z ]") 
+  ) %>% 
+  filter(!is.na(Puntaje_Final)) %>% 
+  filter(!is.na(Departamento))
+
+# --------------------------------------------------------------------------
+# 4. CREACIÓN REGIONES
+# --------------------------------------------------------------------------
+
+# A. Datos Geográficos
+df_Saber_Depto <- df_Master_Saber11 %>%
+  group_by(Departamento) %>% 
+  summarise(Puntaje = mean(Puntaje_Final, na.rm = TRUE), .groups = 'drop') %>% 
+  mutate(Region = case_when(
+    Departamento %in% c("BOGOTA", "CUNDINAMARCA", "BOYACA", "SANTANDER", "ANTIOQUIA", "NORTE SANTANDER", "QUINDIO", "RISARALDA", "CALDAS", "TOLIMA", "HUILA") ~ "Andina",
+    Departamento %in% c("ATLANTICO", "BOLIVAR", "MAGDALENA", "SUCRE", "CESAR", "CORDOBA", "LA GUAJIRA", "GUAJIRA", "SAN ANDRES") ~ "Caribe",
+    Departamento %in% c("VALLE", "CHOCO", "NARINO", "CAUCA") ~ "Pacifico", # NARINO ya no tendrá ~
+    Departamento %in% c("META", "CASANARE", "ARAUCA", "VICHADA") ~ "Orinoquía",
+    Departamento %in% c("AMAZONAS", "PUTUMAYO", "CAQUETA", "GUAINIA", "GUAVIARE", "VAUPES") ~ "Amazonía",
+    TRUE ~ "Otras"
+  ))
+
+# B. Datos Brecha Público/Privado
+df_Brecha_Naturaleza <- df_Master_Saber11 %>% 
+  filter(!is.na(Tipo)) %>% 
+  group_by(Tipo) %>% 
+  summarise(Puntaje = mean(Puntaje_Final, na.rm = TRUE)) 
+
+# C. Datos Urbano/Rural
+df_Zona_Ubicacion <- df_Master_Saber11 %>% 
+  filter(!is.na(Zona)) %>% 
+  group_by(Zona) %>% 
+  summarise(Puntaje = mean(Puntaje_Final, na.rm = TRUE))
+
+# En este trabajo sólo analizaré la eduación Colombiana, su contexto y todo lo que conlleva del año 2021 en el primer trimestre para poder centrarnos en el periodo después de la Pandemia, puesto que a mi parecer es uno de los momentos clave en la educación a nivle global.
+```
+:::
+
+<div>
+
+# 3. Análisis Geográfico del Saber
+
+Al igual que la infraestructura económica, la calidad educativa en Colombia presenta una gran concentración geográfica. Para visualizar esto, generamos un ranking de los departamentos según su Puntaje Global Promedio.
+
+```{r}
+#| warning: false
+#| message: false
+#| fig-cap: "Ranking Calidad Educativa por Departamento"
+
+# 1. Ordenamos datos
+df_ranking <- df_Saber_Depto %>%
+  arrange(desc(Puntaje)) %>% 
+  mutate(Departamento = reorder(Departamento, Puntaje))
+
+# 2. Gráfico 
+p_ranking <- ggplot(df_ranking, aes(x = Departamento, y = Puntaje, fill = Region,
+                                    text = paste("Departamento:", Departamento, "<br>",
+                                                 "Puntaje Promedio:", round(Puntaje, 1), "<br>",
+                                                 "Región:", Region))) +
+  geom_col() +
+  coord_flip() + 
+  scale_fill_viridis_d(option = "turbo") + 
+  labs(title = "Ranking Nacional Saber 11 (2021)",
+       x = NULL,
+       y = "Puntaje Promedio Global") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+ggplotly(p_ranking, tooltip = "text")
+```
+
+Vemos que los mejores resultados se concentran en el centro del país. La **Región Andina** (Bogotá, Santander, Boyacá) siempre ocupa los primeros puestos. En cambio, zonas como la **Amazonía** y el **Pacífico** se quedan muy atrás, lo que demuestra que el desarrollo de cada región influye directamente en las notas de los estudiantes.
+
+</div>
+
+<div>
+
+# 4. La Brecha Estructural: Oficial vs. No Oficial
+
+Este gráfico es clave porque nos muestra de frente la desigualdad social. Con los datos ya limpios, se ve clarísima la diferencia de puntajes. Lo que hacemos aquí es comparar si hay mucha distancia entre la educación pública (**Oficial**) y la privada (**No Oficial**), para ver si el sistema es justo o si estudiar en un colegio privado te da demasiada ventaja.
+
+```{r}
+#| warning: false
+#| fig-cap: "Comparativa Sector Público vs. Privado"
+
+# 1. LIMPIEZA
+
+df_Brecha_Limpia <- df_Brecha_Naturaleza %>%
+  mutate(Tipo = str_remove_all(Tipo, "[\"]")) %>% 
+  filter(!is.na(Tipo))
+
+# 2. El Gráfico
+ggplot(df_Brecha_Limpia, aes(x = Tipo, y = Puntaje, fill = Tipo)) +
+  geom_col(width = 0.5, color = "black", alpha = 0.8) +
+  geom_text(aes(label = round(Puntaje, 1)), vjust = -0.5, size = 6, fontface = "bold") +
+  scale_fill_manual(values = c("NO OFICIAL" = "green", "OFICIAL" = "red")) + 
+  # Subimos el límite vertical para que quepa el texto
+  scale_y_continuous(limits = c(0, 360)) +
+  labs(title = "Brecha Educativa Estructural",
+       subtitle = "Puntaje Global Promedio (2021)",
+       x = "Naturaleza Jurídica", 
+       y = "Puntaje Promedio") +
+  theme_light() +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold", size = 14))
+```
+
+Los datos muestran una **brecha profunda**: los colegios privados superan a los oficiales por un margen amplio. Esta diferencia no es solo estadística, sino que representa desigualdades en acceso a infraestructura, tecnología e intensidad horaria.
+
+</div>
+
+<div>
+
+# 5. Desempeño por Áreas de Conocimiento
+
+Para ver en qué son buenos y en qué fallan los estudiantes, no nos quedamos solo con el puntaje total. Separamos las notas por materias (Matemáticas, Inglés, Lectura, etc.) y usamos un **Mapa de Calor** para ver qué regiones dominan cada asignatura y cuáles se quedan atrás.
+
+```{r}
+#| warning: false
+#| message: false
+#| fig-cap: "Mapa de Calor: Rendimiento por Asignatura y Región"
+
+# 1. Preparación de datos 
+df_heatmap <- df_Master_Saber11 %>%
+  # Traemos la región
+  inner_join(df_Saber_Depto %>% select(Departamento, Region), by = "Departamento") %>%
+  select(Region, starts_with("punt_")) %>%
+  # Convertimos a formato largo
+  pivot_longer(cols = starts_with("punt_"), names_to = "Materia", values_to = "Nota_Raw") %>%
+  mutate(
+    # --- CORRECCIÓN CLAVE: Convertimos el texto a número ---
+    Nota = parse_number(as.character(Nota_Raw), locale = locale(decimal_mark = ",")),
+    # Backup por si usa puntos en vez de comas
+    Nota = ifelse(is.na(Nota), parse_number(as.character(Nota_Raw), locale = locale(decimal_mark = ".")), Nota),
+    
+    # Limpiamos nombres de materias
+    Materia = case_when(
+      str_detect(Materia, "matem") ~ "Matemáticas",
+      str_detect(Materia, "lectura") ~ "Lectura Crítica",
+      str_detect(Materia, "ingles") ~ "Inglés",
+      str_detect(Materia, "sociales") ~ "Sociales",
+      str_detect(Materia, "naturales") ~ "Ciencias",
+      TRUE ~ "Otras"
+    )
+  ) %>%
+  # Ahora sí podemos calcular el promedio porque 'Nota' es número
+  group_by(Region, Materia) %>%
+  summarise(Promedio = mean(Nota, na.rm = TRUE), .groups = 'drop')
+
+# 2. Visualización
+ggplot(df_heatmap, aes(x = Materia, y = Region, fill = Promedio)) +
+  geom_tile(color = "white", lwd = 1) + 
+  geom_text(aes(label = round(Promedio, 1)), color = "black", size = 3.5) +
+  scale_fill_distiller(palette = "RdYlBu", direction = 1) + # Rojo=Bajo, Azul=Alto
+  labs(title = "Mapa de Calor: Fortalezas y Debilidades",
+       x = NULL, y = NULL, fill = "Puntaje") +
+  theme_minimal() +
+  theme(panel.grid = element_blank())
+```
+
+El mapa nos lanza una alerta: el **Inglés** es, de lejos, la asignatura más floja en casi todas las regiones (tonos rojos), lo cual es una barrera para el futuro profesional. Por otra parte, en **Lectura Crítica** es donde suelen tener los mejores resultados.
+
+</div>
+
+<div>
+
+# 6. Desigualdad Geográfica: Urbano vs. Rural
+
+No solo importa si el colegio es público o privado, el lugar donde vive el estudiante también pesa mucho. En Colombia, las zonas rurales siempre han tenido más dificuktad que las ciudades: les falta transporte, buenas carreteras y, sobre todo, conexión a internet.
+
+```{r}
+#| warning: false
+#| message: false
+#| fig-cap: "Urbano vs. Rural"
+
+
+df_Zona_Dinamica <- df_Master_Saber11 %>%
+  mutate(Zona = str_remove_all(Zona, "[\"]")) %>%
+  filter(!is.na(Zona))
+
+# 2. gráfico líneas
+p_zona <- ggplot(df_Zona_Dinamica, aes(x = Puntaje_Final, color = Zona, fill = Zona)) +
+  geom_density(alpha = 0.1, size = 1) + 
+  scale_color_manual(values = c("URBANO" = "orange", "RURAL" = "darkblue")) +
+  scale_fill_manual(values = c("URBANO" = "orange", "RURAL" = "darkblue")) +
+  labs(title = "Distribución Dinámica: Campo vs. Ciudad",
+       subtitle = "Mueve el ratón sobre líneas para ver detalles",
+       x = "Puntaje Global (0-500)",
+       y = "Densidad") +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+# 3. Lo hago dinámico
+ggplotly(p_zona) %>% 
+  layout(legend = list(orientation = "h", x = 0.3, y = 1.1))
+```
+
+El gráfico lo deja claro: estudiar en el campo es una desventaja. Aunque la diferencia no es tan grande como la que hay entre colegios públicos y privados, sigue siendo una prueba de que al Estado le cuesta mucho llevar la misma calidad educativa a las zonas más alejadas.
+
+</div>
+
+<div>
+
+# **7.** Correlación: Matemáticas vs. Inglés
+
+¿Ser bueno en números significa ser bueno en idiomas?
+
+Aquí comparamos las dos materias. Si los puntos van subiendo en diagonal, significa que **van de la mano**: quien saca buena nota en una, suele sacarla en la otra. También nos sirve para detectar departamentos que brillan en una cosa pero cojean en la otra.
+
+```{r}
+#| warning: false
+#| message: false
+#| fig-cap: "Correlación: Mates vs. Ingles"
+
+# 1. Preparación datos
+df_scatter <- df_Master_Saber11 %>%
+
+  select(Departamento, starts_with("punt_")) %>%
+  pivot_longer(cols = starts_with("punt_"), names_to = "Materia_Raw", values_to = "Nota_Raw") %>%
+  mutate(
+
+    Nota = parse_number(as.character(Nota_Raw), locale = locale(decimal_mark = ",")),
+    Nota = ifelse(is.na(Nota), parse_number(as.character(Nota_Raw), locale = locale(decimal_mark = ".")), Nota),
+
+    Materia = case_when(
+      str_detect(Materia_Raw, "matem") ~ "Matemáticas",
+      str_detect(Materia_Raw, "ingles") ~ "Inglés",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(Materia)) %>%
+
+  group_by(Departamento, Materia) %>%
+  summarise(Promedio = mean(Nota, na.rm = TRUE), .groups = 'drop') %>%
+
+  pivot_wider(names_from = Materia, values_from = Promedio) %>%
+
+  inner_join(df_Saber_Depto %>% select(Departamento, Region), by = "Departamento")
+
+# 2. Gráfico
+p_scatter <- ggplot(df_scatter, aes(x = Matemáticas, y = Inglés, color = Region,
+text = paste("Departamento:", Departamento, "<br>",
+ "Matemáticas:", round(Matemáticas, 1), "<br>",
+  "Inglés:", round(Inglés, 1)))) +
+  geom_point(size = 4, alpha = 0.8) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(title = "Correlación Académica",
+       subtitle = "¿Existe relación entre Mates e Inglés?",
+       x = "Puntaje Promedio en Mates",
+       y = "Puntaje Promedio en Inglés") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+ggplotly(p_scatter, tooltip = "text")
+```
+
+</div>
+
+<div>
+
+# 8. La Curva de la Desigualdad
+
+El promedio nos dice dónde está el centro, pero esconde los detalles.
+
+La mayoría saca buenas notas o se queda abajo? Este gráfico muestra la realidad. Si las curvas de los colegios públicos y privados se parecen, vamos bien. Si se separan mucho, hay desigualdad.
+
+```{r}
+#| warning: false
+#| message: false
+#| fig-cap: "Distribución Puntajes: Dos realidades educativas"
+
+# 1. Limpieza
+df_densidad <- df_Master_Saber11 %>%
+  mutate(Tipo = str_remove_all(Tipo, "[\"]")) %>%
+  filter(!is.na(Tipo))
+
+# 2. Gráfico
+p_densidad <- ggplot(df_densidad, aes(x = Puntaje_Final, fill = Tipo)) +
+  geom_density(alpha = 0.6, color = NA) + 
+  scale_fill_manual(values = c("NO OFICIAL" = "green", "OFICIAL" = "red")) +
+  labs(title = "Distribución Puntajes Globales",
+       subtitle = "¿Cómo se concentran los resultados?",
+       x = "Puntaje Global (0-500)",
+       y = "Densidad Estudiantes") +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+ggplotly(p_densidad) %>% 
+  layout(legend = list(orientation = "h", x = 0.3, y = 1.1))
+```
+
+> "La curva verde (colegios privados) se estira hacia la derecha, lo que significa que es mucho más común ver puntajes altos (más de 350). En cambio, la roja (públicos) es como una montaña alta y flaca en la zona de notas bajas. Esto nos dice que la gran mayoría de estudiantes oficiales están amontonados ahí y es muy difícil para ellos despegarse del promedio bajo.
+
+</div>
+
+<div>
+
+# 9. Desigualdad Regional: ¿Quiénes son los "Outliers"?
+
+> El promedio dice que la Región Andina gana, pero el promedio a veces engaña o es confuso. ¿En el Pacífico nadie saca buenas notas? Es estadisticamente imposible eso. Con el **Boxplot** podemos ver más allá.
+>
+> La línea negra es la mediana, pero lo interesante son los puntos que se salen de la caja (**Outliers**). Estos puntos nos demuestran que hay alumnos muy buenos rompiendo las estadísticas incluso en las zonas con menos recursos.
+
+```{r}
+#| warning: false
+#| fig-cap: "Dispersión Puntajes por Región"
+
+p_box <- ggplot(df_Saber_Depto, aes(x = Region, y = Puntaje, fill = Region)) +
+  geom_boxplot(outlier.colour = "red", outlier.shape = 1) +
+  geom_jitter(width = 0.2, alpha = 0.3, size = 1) +
+  scale_fill_viridis_d(option = "turbo") +
+  labs(title = "Variabilidad dentro de las Regiones",
+       subtitle = "Cada punto es un departamento",
+       x = NULL,
+       y = "Puntaje Promedio") +
+  theme_light() +
+  theme(legend.position = "none")
+
+ggplotly(p_box)
+```
+
+A pesar de que los promedios en la Amazonía y el Pacífico son bajos, esos puntos que se escapan hacia arriba son clave. Nos demuestran que hay excepciones que van en contra de las estadísticas de su región. La Región Andina, con la caja más alta, vuelve a confirmar su dominio.
+
+</div>
+
+<div>
+
+# 10. Conclusiones
+
+Después de darle vueltas a todos los datos, nos quedamos con tres grandes lecciones sobre cómo está la educación en Colombia:
+
+1.  **Depende de donde nazcas tu futuro será uno u otro:** Confirmamos que el país está muy centralizado. Si vives en la región Andina (Bogotá, Santander, Boyacá), tienes mucha ventaja sobre los estudiantes del Amazonas o el Pacífico. Es triste, pero nacer en x sitio sigue marcando el destino educativo de muchos jóvenes.
+
+2.  **Dos mundos distintos:** La diferencia entre colegios públicos y privados no es un mito, es una barrera enorme. Los gráficos han mostrado que para un estudiante de colegio público es muchísimo más difícil llegar a los puntajes altos (más de 350). Mientras esto no cambie, el sistema seguirá repitiendo las mismas desigualdades de siempre.
+
+3.  **El Inglés es el "imposible":** Es la materia que más cuesta. Mientras que en Lectura Crítica se defienden bien, en Inglés los promedios estan bajisimos en casi todo el país. Esto es preocupante porque, en un mundo globalizado, no saber inglés deja en desventaja para conseguir buenos trabajos en el futuro.
+
+</div>
